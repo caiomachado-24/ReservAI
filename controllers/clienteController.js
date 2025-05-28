@@ -1,29 +1,42 @@
 const pool = require("../db");
 
-// Encontrar cliente pelo telefone, ou criar se não existir
-async function encontrarOuCriarCliente(telefone, nome = "Cliente") {
-  const [rows] = await pool.query("SELECT * FROM clientes WHERE telefone = ?", [
-    telefone,
-  ]);
+async function encontrarOuCriarCliente(telefone, nomePadrao = "Cliente") {
+  const numeroLimpo = telefone.replace(/^whatsapp:/i, "").trim();
 
-  if (rows.length > 0) {
-    return rows[0]; // cliente já existe
-  } else {
-    const [result] = await pool.query(
-      "INSERT INTO clientes (telefone, nome, verified_at) VALUES (?, ?, NOW())",
-      [telefone, nome]
+  try {
+    const [rows] = await pool.query(
+      "SELECT id, nome, telefone FROM clientes WHERE telefone = ?",
+      [numeroLimpo]
     );
 
-    return { id: result.insertId, telefone, nome };
+    if (rows.length > 0) {
+      return rows[0];
+    }
+
+    const [result] = await pool.query(
+      "INSERT INTO clientes (telefone, nome, verified_at) VALUES (?, ?, NOW())",
+      [numeroLimpo, nomePadrao]
+    );
+
+    return { id: result.insertId, nome: nomePadrao, telefone: numeroLimpo };
+  } catch (error) {
+    console.error("Erro em encontrarOuCriarCliente:", error);
+    throw new Error("Falha ao encontrar ou criar cliente: " + error.message);
   }
 }
 
-// (opcional) Atualizar nome do cliente se necessário
-async function atualizarNomeCliente(id, nome) {
-  await pool.query("UPDATE clientes SET nome = ? WHERE id = ?", [nome, id]);
+async function atualizarNomeCliente(clienteId, novoNome) {
+  try {
+    const [result] = await pool.query(
+      "UPDATE clientes SET nome = ? WHERE id = ?",
+      [novoNome, clienteId]
+    );
+
+    return result.affectedRows > 0;
+  } catch (error) {
+    console.error("Erro em atualizarNomeCliente:", error);
+    throw new Error("Falha ao atualizar nome do cliente: " + error.message);
+  }
 }
 
-module.exports = {
-  encontrarOuCriarCliente,
-  atualizarNomeCliente, // se quiser permitir edição depois
-};
+module.exports = { encontrarOuCriarCliente, atualizarNomeCliente };
