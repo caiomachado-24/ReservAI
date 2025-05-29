@@ -1,139 +1,76 @@
-// controllers/agendamentoController.js
-const pool = require("../db"); // Importa o pool de conexões do banco de dados
+const pool = require("../db");
 
-/**
- * Busca um serviço específico pelo nome no banco de dados.
- * @param {string} nomeServico - O nome do serviço a ser buscado.
- * @returns {Promise<Object|null>} Um objeto contendo o ID e nome do serviço, ou null se não encontrado.
- * @throws {Error} Se ocorrer um erro durante a consulta ao banco de dados.
- */
-async function buscarServicoPorNome(nomeServico) {
-  try {
-    const [rows] = await pool.query(
-      "SELECT id, nome FROM servicos WHERE nome = ?",
-      [nomeServico]
-    );
-    return rows.length > 0 ? rows[0] : null;
-  } catch (error) {
-    console.error("Erro ao buscar serviço por nome:", error);
-    // Re-lança o erro para que seja tratado em um nível superior (ex: no webhook)
-    throw new Error("Falha ao buscar serviço: " + error.message);
-  }
-}
-
-/**
- * Busca um barbeiro específico pelo nome no banco de dados.
- * @param {string} nomeBarbeiro - O nome do barbeiro a ser buscado.
- * @returns {Promise<Object|null>} Um objeto contendo o ID, nome e especialidade do barbeiro, ou null se não encontrado.
- * @throws {Error} Se ocorrer um erro durante a consulta ao banco de dados.
- */
-async function buscarBarbeiroPorNome(nomeBarbeiro) {
-  try {
-    const [rows] = await pool.query(
-      "SELECT id, nome, especialidade FROM barbeiros WHERE nome = ?",
-      [nomeBarbeiro]
-    );
-    return rows.length > 0 ? rows[0] : null;
-  } catch (error) {
-    console.error("Erro ao buscar barbeiro por nome:", error);
-    throw new Error("Falha ao buscar barbeiro: " + error.message);
-  }
-}
-
-/**
- * Lista todos os barbeiros cadastrados no banco de dados.
- * @returns {Promise<Array<Object>>} Um array de objetos, cada um representando um barbeiro.
- * @throws {Error} Se ocorrer um erro durante a consulta ao banco de dados.
- */
-// async function listarBarbeiros() {
-//   try {
-//     const [rows] = await pool.query(
-//       "SELECT id, nome FROM barbeiros ORDER BY nome"
-//     );
-//     return rows;
-//   } catch (error) {
-//     console.error("Erro ao listar barbeiros:", error);
-//     throw new Error("Falha ao listar barbeiros: " + error.message);
-//   }
-// }
-
-/**
- * Busca horários disponíveis no banco de dados, opcionalmente filtrando por um barbeiro específico.
- * Retorna apenas os horários marcados como 'disponivel' e que ainda não passaram.
- * @param {number|null} barbeiroId - O ID do barbeiro para filtrar os horários, ou null para todos os barbeiros.
- * @returns {Promise<Array<Object>>} Um array de objetos, cada um representando um horário disponível.
- * @throws {Error} Se ocorrer um erro durante a consulta ao banco de dados.
- */
 async function buscarHorariosDisponiveis() {
   try {
-    const [horarios] = await pool.query(`
-      SELECT id, dia_horario, dia_semana
-      FROM horarios_disponiveis
-      WHERE dia_horario > NOW() AND disponivel !=0
-      ORDER BY dia_horario
-      LIMIT 10
-    `);
-    console.log("Horários disponíveis retornados do DB:", horarios);
-    return horarios;
+    const [rows] = await pool.query(
+      `SELECT id, dia_horario, dia_semana 
+       FROM horarios_disponiveis 
+       WHERE disponivel = TRUE 
+       AND dia_horario >= NOW()
+       ORDER BY dia_horario`
+    );
+    return rows;
   } catch (error) {
     console.error("Erro ao buscar horários disponíveis:", error);
-    throw new Error("Falha ao buscar horários disponíveis: " + error.message);
+    throw new Error("Erro ao buscar horários disponíveis.");
   }
 }
 
-/**
- * Agenda um serviço para um cliente em um horário e com um barbeiro específico.
- * Esta função utiliza uma transação para garantir que as operações de agendamento
- * (marcar horário como indisponível e inserir agendamento) sejam atômicas.
- * @param {number} clienteId - O ID do cliente que está agendando.
- * @param {Array<number>} servicoIds - Um array de IDs dos serviços a serem agendados.
- * @param {number} horarioId - O ID do horário disponível que está sendo agendado.
- * @param {number} barbeiroId - O ID do barbeiro associado ao horário.
- * @returns {Promise<void>} Uma Promise que resolve se o agendamento for bem-sucedido.
- * @throws {Error} Se ocorrer um erro durante a transação ou qualquer operação de DB.
- */
-async function agendarServico(clienteId, servicoIds, horarioId) {
-  let connection; // Variável para armazenar a conexão do pool
-
+async function agendarServico(clienteId, horarioId, servicoIds) {
   try {
-    connection = await pool.getConnection(); // Obtém uma conexão do pool
-    await connection.beginTransaction(); // Inicia uma transação para atomicidade
+    // Validate inputs
+    if (!clienteId || !horarioId) {
+      return { success: false, message: "Cliente ou horário inválido." };
+    }
+    if (!Array.isArray(servicoIds) || servicoIds.length === 0) {
+      return { success: false, message: "Nenhum serviço selecionado." };
+    }
 
-    // 1. Marca o horário selecionado como indisponível
-    await connection.query(
-      "UPDATE horarios_disponiveis SET disponivel = 0 WHERE id = ?",
+    await pool.query("START TRANSACTION");
+
+    // Verificar se o horário está disponível
+    const [horario] = await pool.query(
+      "SELECT disponivel FROM horarios_disponiveis WHERE id = ?",
       [horarioId]
     );
+    if (!horario.length || !horario[0].disponivel) {
+      await pool.query("ROLLBACK");
+      return { success: false, message: "Horário indisponível." };
+    }
 
-    // 2. Insere os registros de agendamento na tabela 'agendamentos'
-    // Um registro de agendamento é criado para cada serviço selecionado
+    // Criar o agendamento
+    const [result] = await pool.query(
+      `INSERT INTO agendamentos (cliente_id, horario_id, status, data_agendamento) 
+       VALUES (?, ?, 'ativo', NOW())`,
+      [clienteId, horarioId]
+    );
+    const agendamentoId = result.insertId;
+
+    // Associar serviços ao agendamento
     for (const servicoId of servicoIds) {
-      await connection.query(
-        "INSERT INTO agendamentos (cliente_id, servico_id, horario_id) VALUES (?, ?, ?)",
-        [clienteId, servicoId, horarioId]
+      await pool.query(
+        `INSERT INTO agendamentos_servicos (agendamento_id, servico_id) 
+         VALUES (?, ?)`,
+        [agendamentoId, servicoId]
       );
     }
 
-    await connection.commit(); // Confirma todas as operações da transação
-    // console.log(
-    //   `Agendamento confirmado para o cliente ${clienteId} no horário ${horarioId} com o barbeiro ${barbeiroId}.`
-    // );
+    // Marcar horário como indisponível
+    await pool.query(
+      "UPDATE horarios_disponiveis SET disponivel = FALSE WHERE id = ?",
+      [horarioId]
+    );
+
+    await pool.query("COMMIT");
+    return { success: true };
   } catch (error) {
-    if (connection) {
-      await connection.rollback(); // Em caso de erro, desfaz todas as operações da transação
-    }
+    await pool.query("ROLLBACK");
     console.error("Erro ao agendar serviço:", error);
-    throw new Error("Falha ao agendar serviço: " + error.message); // Re-lança o erro
-  } finally {
-    if (connection) {
-      connection.release(); // Sempre libera a conexão de volta para o pool
-    }
+    return {
+      success: false,
+      message: "Ops, algo deu errado ao agendar. Tente novamente.",
+    };
   }
 }
 
-module.exports = {
-  buscarHorariosDisponiveis,
-  agendarServico,
-  buscarServicoPorNome,
-  buscarBarbeiroPorNome,
-};
+module.exports = { buscarHorariosDisponiveis, agendarServico };
