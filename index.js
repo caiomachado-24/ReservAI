@@ -6,10 +6,11 @@ const {
   buscarHorariosDisponiveis,
   agendarServico,
   buscarServicoPorNome,
-  buscarBarbeiroPorNome,
-  listarBarbeiros,
 } = require("./controllers/agendamentoController");
-const { encontrarOuCriarCliente } = require("./controllers/clienteController");
+const {
+  encontrarOuCriarCliente,
+  atualizarNomeCliente,
+} = require("./controllers/clienteController");
 const pool = require("./db"); // Importa a conexão com o banco de dados
 
 const app = express();
@@ -75,23 +76,22 @@ function formatarData(dia_horario, barbeiroNome = null) {
  * @param {Array<Object>} horariosDisponiveis - Lista de objetos de horários disponíveis.
  * @returns {Object|null} O objeto do horário mais próximo ou null se a lista estiver vazia.
  */
-function encontrarHorarioProximo(horarioSolicitado, horariosDisponiveis) {
-  const [hora, minuto] = horarioSolicitado.split(":").map(Number);
-  const solicitado = new Date();
-  // Define o ano, mês e dia para a data atual, apenas a hora e minuto importam para a comparação de proximidade
-  solicitado.setHours(hora, minuto, 0, 0);
+function encontrarHorarioProximo(horarioSolicitadoStr, horariosDisponiveis) {
+  const solicitado = new Date(horarioSolicitadoStr);
 
   let maisProximo = null;
-  let menorDiferenca = Infinity; // Inicializa com um valor grande para encontrar a menor diferença
+  let menorDiferenca = Infinity;
 
   for (const horario of horariosDisponiveis) {
     const disponivel = new Date(horario.dia_horario);
-    const diferenca = Math.abs(solicitado - disponivel); // Diferença em milissegundos
+    const diferenca = Math.abs(solicitado - disponivel); // Em milissegundos
+
     if (diferenca < menorDiferenca) {
       menorDiferenca = diferenca;
       maisProximo = horario;
     }
   }
+
   return maisProximo;
 }
 
@@ -149,7 +149,7 @@ app.post("/webhook", async (req, res) => {
       case "escolha_servico":
         {
           const servicoNome = parametros?.servico?.stringValue;
-          const barbeiroNome = parametros?.barbeiro?.stringValue;
+          // const barbeiroNome = parametros?.barbeiro?.stringValue;
 
           if (!servicoNome) {
             resposta = "Não entendi qual serviço você deseja. Pode repetir?";
@@ -177,18 +177,6 @@ app.post("/webhook", async (req, res) => {
             agendamentoPendente.servicoIds.push(servico.id);
           }
 
-          let barbeiro = null;
-          if (barbeiroNome) {
-            barbeiro = await buscarBarbeiroPorNome(barbeiroNome);
-            if (!barbeiro) {
-              resposta = `Desculpe, não encontrei o barbeiro "${barbeiroNome}". Por favor, escolha um barbeiro válido ou não especifique um.`;
-              agendamentosPendentes.delete(from); // Cancela o fluxo se o barbeiro não existe
-              break;
-            }
-            agendamentoPendente.barbeiroId = barbeiro.id;
-            agendamentoPendente.barbeiroNome = barbeiro.nome;
-          }
-
           // Busca horários disponíveis, filtrando pelo barbeiro se um foi especificado
           const horarios = await buscarHorariosDisponiveis(
             agendamentoPendente.barbeiroId
@@ -204,17 +192,9 @@ app.post("/webhook", async (req, res) => {
                 : ""
             }, temos os seguintes horários disponíveis:\n\n`;
             resposta += horarios
-              .map((h) => formatarData(h.dia_horario, h.barbeiro_nome))
+              .map((h) => formatarData(h.dia_horario))
               .join("\n");
             resposta += `\n\nInforme o dia e hora desejados (ex: Quarta 14:00).`;
-            if (!agendamentoPendente.barbeiroNome) {
-              const todosBarbeiros = await listarBarbeiros();
-              if (todosBarbeiros.length > 0) {
-                resposta += `\n\nVocê também pode especificar um barbeiro (ex: "Quarta 14:00 com o João"). Barbeiros disponíveis: ${todosBarbeiros
-                  .map((b) => b.nome)
-                  .join(", ")}.`;
-              }
-            }
           }
           agendamentosPendentes.set(from, agendamentoPendente);
         }
@@ -226,8 +206,14 @@ app.post("/webhook", async (req, res) => {
             parametros?.horario_escolhido?.structValue?.fields;
           const horarioEscolhido =
             horarioEscolhidoStruct?.date_time?.stringValue;
-          const barbeiroNome = parametros?.barbeiro?.stringValue;
 
+          if (!horarioEscolhido) {
+            resposta =
+              "Por favor, informe o dia e hora no formato: Quarta 14:00.";
+            break;
+          }
+
+          // const data = new Date(horarioEscolhido);
           if (!horarioEscolhido) {
             resposta =
               "Por favor, informe o dia e hora no formato: Quarta 14:00.";
@@ -241,7 +227,9 @@ app.post("/webhook", async (req, res) => {
             break;
           }
 
-          const dia = data.toLocaleDateString("pt-BR", { weekday: "long" });
+          const dia = data
+            .toLocaleDateString("pt-BR", { weekday: "long" })
+            .toLowerCase();
           const hora = data.toLocaleTimeString("pt-BR", {
             hour: "2-digit",
             minute: "2-digit",
@@ -269,32 +257,21 @@ app.post("/webhook", async (req, res) => {
             break;
           }
 
-          let barbeiro = null;
-          if (barbeiroNome) {
-            barbeiro = await buscarBarbeiroPorNome(barbeiroNome);
-            if (!barbeiro) {
-              resposta = `Desculpe, não encontrei o barbeiro "${barbeiroNome}". Por favor, escolha um barbeiro válido ou não especifique um.`;
-              agendamentosPendentes.delete(from);
-              break;
-            }
-            agendamentoPendente.barbeiroId = barbeiro.id;
-            agendamentoPendente.barbeiroNome = barbeiro.nome;
-          }
-
           try {
             const cliente = await encontrarOuCriarCliente(from, "Cliente");
             agendamentoPendente.clienteId = cliente.id;
 
+            // Consulta SQL ajustada
             let horarioQuery = `
-              SELECT hd.id, hd.dia_horario, hd.dia_semana, hd.barbeiro_id, b.nome AS barbeiro_nome
-              FROM horarios_disponiveis hd
-              JOIN barbeiros b ON hd.barbeiro_id = b.id
-              WHERE hd.dia_semana = ? AND TIME(hd.dia_horario) = ? AND hd.disponivel = TRUE
-            `;
+              SELECT id, dia_horario, dia_semana
+              FROM horarios_disponiveis
+              WHERE LOWER(dia_semana) = ? 
+              AND DATE_FORMAT(dia_horario, '%H:%i') = ?
+              AND disponivel = TRUE`;
             let horarioQueryParams = [dia, hora];
 
             if (agendamentoPendente.barbeiroId) {
-              horarioQuery += ` AND hd.barbeiro_id = ?`;
+              horarioQuery += ` AND barbeiro_id = ?`;
               horarioQueryParams.push(agendamentoPendente.barbeiroId);
             }
 
@@ -303,12 +280,15 @@ app.post("/webhook", async (req, res) => {
               horarioQueryParams
             );
 
+            console.log("Consulta SQL:", horarioQuery);
+            console.log("Parâmetros:", horarioQueryParams);
+            console.log("Resultado da consulta:", horarioRow);
             if (horarioRow.length === 0) {
               const horariosDisponiveis = await buscarHorariosDisponiveis(
                 agendamentoPendente.barbeiroId
               );
               const horarioMaisProximo = encontrarHorarioProximo(
-                hora,
+                data.toISOString(),
                 horariosDisponiveis
               );
 
@@ -322,8 +302,7 @@ app.post("/webhook", async (req, res) => {
               }
 
               const horarioFormatado = formatarData(
-                horarioMaisProximo.dia_horario,
-                horarioMaisProximo.barbeiro_nome
+                horarioMaisProximo.dia_horario
               );
               resposta = `Desculpe, o horário ${dia} às ${hora}${
                 agendamentoPendente.barbeiroNome
@@ -340,8 +319,6 @@ app.post("/webhook", async (req, res) => {
                 horarioId: horarioMaisProximo.id,
                 dia_horario: horarioMaisProximo.dia_horario,
                 servicos,
-                barbeiroId: horarioMaisProximo.barbeiro_id,
-                barbeiroNome: horarioMaisProximo.barbeiro_nome,
                 confirmationStep: "awaiting_name_confirmation",
               });
             } else {
@@ -352,8 +329,6 @@ app.post("/webhook", async (req, res) => {
                 horarioId: horarioRow[0].id,
                 dia_horario: horarioRow[0].dia_horario,
                 servicos,
-                barbeiroId: horarioRow[0].barbeiro_id,
-                barbeiroNome: horarioRow[0].barbeiro_nome,
                 confirmationStep: "awaiting_name_confirmation",
               });
 
@@ -371,8 +346,7 @@ app.post("/webhook", async (req, res) => {
               );
               const clienteInfo = clienteRows[0];
               if (clienteInfo) {
-                // Melhoria na mensagem de confirmação do nome
-                resposta += ` Antes de confirmar, posso agendar no nome de *${clienteInfo.nome}* (${clienteInfo.telefone})? Responda "Sim" para confirmar ou "Não" para outro nome.`;
+                resposta += ` \nAntes de confirmar, posso agendar no nome de *${clienteInfo.nome}*?\nResponda "Sim" para confirmar ou "Não" para outro nome.`;
               } else {
                 resposta += ` Antes de confirmar, qual nome e telefone gostaria de usar para o agendamento?`;
               }
@@ -391,6 +365,7 @@ app.post("/webhook", async (req, res) => {
         if (!dadosAgendamento) {
           resposta =
             "Nenhum agendamento pendente encontrado. Por favor, comece novamente.";
+          agendamentosPendentes.delete(from);
           break;
         }
 
@@ -400,14 +375,15 @@ app.post("/webhook", async (req, res) => {
           horarioId,
           dia_horario,
           servicos,
-          barbeiroId,
-          barbeiroNome,
           confirmationStep,
         } = dadosAgendamento;
 
         const isConfirmation =
           msg.toLowerCase().includes("sim") ||
-          msg.toLowerCase().includes("confirmar");
+          msg.toLowerCase().includes("confirmar") ||
+          msg.toLowerCase().includes("fechou") ||
+          msg.toLowerCase().includes("pode marcar") ||
+          msg.toLowerCase().includes("pode agendar");
         const isCancellation =
           msg.toLowerCase().includes("não") ||
           msg.toLowerCase().includes("cancelar");
@@ -423,18 +399,12 @@ app.post("/webhook", async (req, res) => {
               const clienteInfo = clienteRows[0];
 
               if (clienteInfo) {
-                const horarioFormatado = formatarData(
-                  dia_horario,
-                  barbeiroNome
-                );
-                // Melhoria na mensagem de confirmação final com nome e telefone
+                const horarioFormatado = formatarData(dia_horario);
                 resposta = `Certo! Posso agendar seu *${servicos.join(
                   " e "
                 )}* para *${horarioFormatado}* no nome de *${
                   clienteInfo.nome
-                }* (${
-                  clienteInfo.telefone
-                })? Responda "Sim" para confirmar ou "Não" para cancelar.`;
+                }* ? Responda "Sim" para confirmar ou "Não" para cancelar.`;
 
                 agendamentosPendentes.set(from, {
                   ...dadosAgendamento,
@@ -457,11 +427,14 @@ app.post("/webhook", async (req, res) => {
               agendamentosPendentes.delete(from);
             }
           } else if (isCancellation) {
-            resposta = "Agendamento cancelado. Se precisar, comece novamente.";
-            agendamentosPendentes.delete(from);
+            resposta = "Qual nome gostaria de usar para o agendamento?";
+            agendamentosPendentes.set(from, {
+              ...dadosAgendamento,
+              confirmationStep: "awaiting_new_name",
+            });
           } else {
             resposta =
-              "Por favor, responda 'Sim' para confirmar o nome ou 'Não' para cancelar o agendamento.";
+              "Por favor, responda 'Sim' para confirmar o nome ou 'Não' para fornecer outro nome.";
           }
           break;
         }
@@ -481,25 +454,22 @@ app.post("/webhook", async (req, res) => {
                 agendamentosPendentes.delete(from);
                 break;
               }
+              console.log(horarioId);
+              console.log(clienteId);
+              console.log(servicoIds);
+              await agendarServico(clienteId, servicoIds, horarioId);
 
-              await agendarServico(
-                clienteId,
-                servicoIds,
-                horarioId,
-                barbeiroId
-              );
-
-              const horarioFormatado = formatarData(dia_horario, barbeiroNome);
-              // Mensagem final de sucesso com nome e telefone do cliente
+              const horarioFormatado = formatarData(dia_horario);
               resposta = `✅ Agendado! Seu *${servicos.join(
                 " e "
               )}* foi marcado para *${horarioFormatado}* em nome de *${
                 dadosAgendamento.clienteNome
-              }* (${dadosAgendamento.clienteTelefone}).`;
+              }*.`;
               agendamentosPendentes.delete(from);
             } catch (err) {
               console.error("Erro ao confirmar agendamento:", err);
               resposta = "Erro ao confirmar o agendamento. Tente novamente.";
+              agendamentosPendentes.delete(from);
             }
           } else if (isCancellation) {
             resposta = "Agendamento cancelado. Se precisar, comece novamente.";
@@ -515,6 +485,53 @@ app.post("/webhook", async (req, res) => {
         resposta =
           "Nenhum agendamento pendente ou etapa de confirmação ativa. Por favor, comece novamente.";
         agendamentosPendentes.delete(from);
+        break;
+
+      case "informar_novo_nome":
+        const novoNome =
+          parametros?.novo_nome?.structValue?.fields?.name?.stringValue;
+        console.log(parametros?.novo_nome?.structValue);
+        if (!novoNome || novoNome.trim().length < 2 || /^\d+$/.test(novoNome)) {
+          resposta = "Por favor, informe um nome válido para o agendamento.";
+          break;
+        }
+
+        const dadosAgendamentoNovoNome = agendamentosPendentes.get(from);
+        if (
+          !dadosAgendamentoNovoNome ||
+          dadosAgendamentoNovoNome.confirmationStep !== "awaiting_new_name"
+        ) {
+          resposta =
+            "Nenhum agendamento pendente encontrado ou não está na etapa de informar nome. Por favor, comece novamente.";
+          agendamentosPendentes.delete(from);
+          break;
+        }
+
+        try {
+          // Atualiza o nome do cliente no banco de dados
+          await atualizarNomeCliente(
+            dadosAgendamentoNovoNome.clienteId,
+            novoNome
+          );
+
+          const horarioFormatado = formatarData(
+            dadosAgendamentoNovoNome.dia_horario,
+            dadosAgendamentoNovoNome.barbeiroNome
+          );
+          resposta = `Certo! Posso agendar seu *${dadosAgendamentoNovoNome.servicos.join(
+            " e "
+          )}* para *${horarioFormatado}* no nome de *${novoNome}*? Responda "Sim" para confirmar ou "Não" para cancelar.`;
+
+          agendamentosPendentes.set(from, {
+            ...dadosAgendamentoNovoNome,
+            confirmationStep: "awaiting_final_booking",
+            clienteNome: novoNome,
+          });
+        } catch (err) {
+          console.error("Erro ao atualizar nome do cliente:", err);
+          resposta = "Erro ao atualizar o nome. Tente novamente.";
+          agendamentosPendentes.delete(from);
+        }
         break;
 
       default:

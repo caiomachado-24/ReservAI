@@ -45,17 +45,17 @@ async function buscarBarbeiroPorNome(nomeBarbeiro) {
  * @returns {Promise<Array<Object>>} Um array de objetos, cada um representando um barbeiro.
  * @throws {Error} Se ocorrer um erro durante a consulta ao banco de dados.
  */
-async function listarBarbeiros() {
-  try {
-    const [rows] = await pool.query(
-      "SELECT id, nome FROM barbeiros ORDER BY nome"
-    );
-    return rows;
-  } catch (error) {
-    console.error("Erro ao listar barbeiros:", error);
-    throw new Error("Falha ao listar barbeiros: " + error.message);
-  }
-}
+// async function listarBarbeiros() {
+//   try {
+//     const [rows] = await pool.query(
+//       "SELECT id, nome FROM barbeiros ORDER BY nome"
+//     );
+//     return rows;
+//   } catch (error) {
+//     console.error("Erro ao listar barbeiros:", error);
+//     throw new Error("Falha ao listar barbeiros: " + error.message);
+//   }
+// }
 
 /**
  * Busca horários disponíveis no banco de dados, opcionalmente filtrando por um barbeiro específico.
@@ -64,27 +64,17 @@ async function listarBarbeiros() {
  * @returns {Promise<Array<Object>>} Um array de objetos, cada um representando um horário disponível.
  * @throws {Error} Se ocorrer um erro durante a consulta ao banco de dados.
  */
-async function buscarHorariosDisponiveis(barbeiroId = null) {
-  let query = `
-    SELECT hd.id, hd.dia_horario, hd.dia_semana, b.nome AS barbeiro_nome, b.id AS barbeiro_id
-    FROM horarios_disponiveis hd
-    JOIN barbeiros b ON hd.barbeiro_id = b.id
-    WHERE hd.disponivel = TRUE
-    AND hd.dia_horario > NOW() -- Filtra apenas horários que ainda não passaram
-  `;
-  let queryParams = [];
-
-  if (barbeiroId) {
-    query += ` AND hd.barbeiro_id = ?`;
-    queryParams.push(barbeiroId);
-  }
-
-  query += ` ORDER BY hd.dia_horario LIMIT 10`; // Limita a quantidade de horários para a resposta do bot
-
+async function buscarHorariosDisponiveis() {
   try {
-    const [rows] = await pool.query(query, queryParams);
-    console.log("Horários disponíveis retornados do DB:", rows); // Log para depuração
-    return rows;
+    const [horarios] = await pool.query(`
+      SELECT id, dia_horario, dia_semana
+      FROM horarios_disponiveis
+      WHERE dia_horario > NOW() AND disponivel !=0
+      ORDER BY dia_horario
+      LIMIT 10
+    `);
+    console.log("Horários disponíveis retornados do DB:", horarios);
+    return horarios;
   } catch (error) {
     console.error("Erro ao buscar horários disponíveis:", error);
     throw new Error("Falha ao buscar horários disponíveis: " + error.message);
@@ -102,7 +92,7 @@ async function buscarHorariosDisponiveis(barbeiroId = null) {
  * @returns {Promise<void>} Uma Promise que resolve se o agendamento for bem-sucedido.
  * @throws {Error} Se ocorrer um erro durante a transação ou qualquer operação de DB.
  */
-async function agendarServico(clienteId, servicoIds, horarioId, barbeiroId) {
+async function agendarServico(clienteId, servicoIds, horarioId) {
   let connection; // Variável para armazenar a conexão do pool
 
   try {
@@ -111,7 +101,7 @@ async function agendarServico(clienteId, servicoIds, horarioId, barbeiroId) {
 
     // 1. Marca o horário selecionado como indisponível
     await connection.query(
-      "UPDATE horarios_disponiveis SET disponivel = FALSE WHERE id = ?",
+      "UPDATE horarios_disponiveis SET disponivel = 0 WHERE id = ?",
       [horarioId]
     );
 
@@ -119,15 +109,15 @@ async function agendarServico(clienteId, servicoIds, horarioId, barbeiroId) {
     // Um registro de agendamento é criado para cada serviço selecionado
     for (const servicoId of servicoIds) {
       await connection.query(
-        "INSERT INTO agendamentos (cliente_id, servico_id, horario_id, barbeiro_id) VALUES (?, ?, ?, ?)",
-        [clienteId, servicoId, horarioId, barbeiroId]
+        "INSERT INTO agendamentos (cliente_id, servico_id, horario_id) VALUES (?, ?, ?)",
+        [clienteId, servicoId, horarioId]
       );
     }
 
     await connection.commit(); // Confirma todas as operações da transação
-    console.log(
-      `Agendamento confirmado para o cliente ${clienteId} no horário ${horarioId} com o barbeiro ${barbeiroId}.`
-    );
+    // console.log(
+    //   `Agendamento confirmado para o cliente ${clienteId} no horário ${horarioId} com o barbeiro ${barbeiroId}.`
+    // );
   } catch (error) {
     if (connection) {
       await connection.rollback(); // Em caso de erro, desfaz todas as operações da transação
@@ -146,5 +136,4 @@ module.exports = {
   agendarServico,
   buscarServicoPorNome,
   buscarBarbeiroPorNome,
-  listarBarbeiros,
 };
