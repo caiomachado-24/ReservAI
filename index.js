@@ -7,44 +7,43 @@ const {
 } = require("./controllers/agendamentoController");
 const {
   encontrarOuCriarCliente,
-  atualizarNomeCliente, // Embora não esteja sendo usada diretamente, mantive caso seja útil em outro ponto.
+  atualizarNomeCliente,
 } = require("./controllers/clienteController");
 const {
   listarAgendamentosAtivos,
-  cancelarAgendamento, // Embora não esteja sendo usada diretamente, mantive caso seja útil em outro ponto.
+  cancelarAgendamento,
   reagendarAgendamento,
 } = require("./controllers/gerenciamentoController");
-const pool = require("./db"); // Importe o pool de conexão do banco de dados
+const pool = require("./db");
 
 const app = express();
 const port = 3000;
 
 // Configuração do Dialogflow
 const sessionClient = new dialogflow.SessionsClient({
-  keyFilename: "./reservai_twilio.json",
+  keyFilename: "./reservai_twilio.json", // Caminho para sua chave de serviço do Dialogflow
 });
-const projectId = "reservai-twilio-qrps";
+const projectId = "reservai-twilio-qrps"; // ID do seu projeto Dialogflow
 
-// Map para armazenar agendamentos pendentes por sessionId (from)
-// Usar 'from' como chave é adequado para identificar sessões de usuário.
+// Armazena estados temporários dos agendamentos por usuário
 const agendamentosPendentes = new Map();
 
-// Middlewares
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// --- Funções Auxiliares ---
 /**
  * Formata um objeto Date para uma string legível em português.
- * Ex: "Sexta-feira, 17/05/2024 às 10:30"
- * @param {Date|string} dia_horario - A data/hora a ser formatada.
- * @returns {string} A data/hora formatada.
+ * @param {Date|string} dia_horario - O objeto Date ou string de data/hora.
+ * @returns {string} Data e hora formatadas (ex: "Sexta-feira, 30/05/2025, 09:00").
  */
 function formatarData(dia_horario) {
   const data = new Date(dia_horario);
   if (isNaN(data.getTime())) {
-    console.error("Data inválida fornecida para formatarData:", dia_horario);
-    return "Data inválida"; // Retorna uma string de erro ou lida de outra forma
+    console.error(
+      "ERRO: Data inválida fornecida para formatarData:",
+      dia_horario
+    );
+    return "Data inválida";
   }
 
   const options = {
@@ -56,28 +55,31 @@ function formatarData(dia_horario) {
     minute: "2-digit",
     hour12: false,
   };
-  // Usar toLocaleString diretamente é mais conciso e robusto para formatação de data.
   const formattedDate = new Intl.DateTimeFormat("pt-BR", options).format(data);
-
   // Capitaliza a primeira letra do dia da semana
   return formattedDate.charAt(0).toUpperCase() + formattedDate.slice(1);
 }
 
 /**
- * Encontra o horário disponível mais próximo de um horário solicitado.
- * @param {string} horarioSolicitadoStr - A string de data/hora solicitada.
- * @param {Array<Object>} horariosDisponiveis - Lista de objetos de horários disponíveis, cada um com 'dia_horario' (string ou Date).
- * @returns {Object|null} O objeto do horário mais próximo ou null se não houver.
+ * Encontra o horário disponível mais próximo a uma data/hora solicitada.
+ * @param {string} horarioSolicitadoStr - String da data/hora solicitada (ISO 8601).
+ * @param {Array<Object>} horariosDisponiveis - Lista de objetos de horários disponíveis.
+ * @returns {Object|null} O objeto do horário mais próximo ou null se nenhum for encontrado.
  */
 function encontrarHorarioProximo(horarioSolicitadoStr, horariosDisponiveis) {
-  if (!horarioSolicitadoStr || !horariosDisponiveis.length) return null;
+  if (
+    !horarioSolicitadoStr ||
+    !horariosDisponiveis ||
+    !horariosDisponiveis.length
+  )
+    return null;
   const solicitado = new Date(horarioSolicitadoStr);
   if (isNaN(solicitado.getTime())) return null;
 
   return horariosDisponiveis.reduce(
     (maisProximo, horario) => {
       const disponivel = new Date(horario.dia_horario);
-      if (isNaN(disponivel.getTime())) return maisProximo; // Ignora horários inválidos na lista
+      if (isNaN(disponivel.getTime())) return maisProximo;
       const diferenca = Math.abs(solicitado - disponivel);
       if (diferenca < maisProximo.diferenca) {
         return { horario, diferenca };
@@ -90,16 +92,14 @@ function encontrarHorarioProximo(horarioSolicitadoStr, horariosDisponiveis) {
 
 /**
  * Normaliza o nome de um serviço para comparação.
- * @param {string} servicoNome - O nome do serviço a ser normalizado.
- * @returns {string} O nome do serviço normalizado.
+ * @param {string} servicoNome - Nome do serviço.
+ * @returns {string} Nome do serviço em minúsculas, sem espaços.
  */
 function normalizarServico(servicoNome) {
   return servicoNome.toLowerCase().replace(/\s+/g, "");
 }
 
-/**
- * Mapeamento de serviços válidos e seus IDs.
- */
+// Mapeamento de serviços válidos e seus IDs no banco de dados
 const SERVICOS_VALIDOS = {
   corte: { id: 1, nome: "Corte" },
   cortarcabelo: { id: 1, nome: "Corte" },
@@ -110,9 +110,10 @@ const SERVICOS_VALIDOS = {
 };
 
 /**
- * Obtém a data de uma string de dia da semana e hora.
- * @param {string} diaSemanaStr - O dia da semana (ex: 'segunda').
- * @param {string} horaStr - A string da hora (ex: '10:00').
+ * Calcula uma data futura com base no dia da semana e hora fornecidos.
+ * Ajusta para a próxima semana se a data/hora já tiver passado no dia atual.
+ * @param {string} diaSemanaStr - Nome do dia da semana (ex: "segunda").
+ * @param {string} horaStr - Hora (ex: "10:00").
  * @returns {Date|null} Objeto Date correspondente ou null se inválido.
  */
 function getDateFromWeekdayAndTime(diaSemanaStr, horaStr) {
@@ -134,15 +135,13 @@ function getDateFromWeekdayAndTime(diaSemanaStr, horaStr) {
   const hoje = new Date();
   let data = new Date(hoje);
 
-  // Calcula a diferença de dias para o próximo dia da semana desejado
   const diferencaDias = (diaSemanaIndex - hoje.getDay() + 7) % 7;
   data.setDate(hoje.getDate() + diferencaDias);
 
   data.setHours(parseInt(hora, 10), parseInt(minuto, 10), 0, 0);
 
-  // Se a data e hora calculadas forem no passado, avança uma semana
+  // Se a data e hora calculadas já passaram hoje, avança para a próxima semana
   if (data < hoje && diferencaDias === 0) {
-    // Considera apenas se for o mesmo dia da semana e a hora já passou
     data.setDate(data.getDate() + 7);
   }
 
@@ -151,15 +150,17 @@ function getDateFromWeekdayAndTime(diaSemanaStr, horaStr) {
 
 // --- Rota Principal do Webhook ---
 app.post("/webhook", async (req, res) => {
-  const msg = req.body.Body || req.body.text; // Flexibilidade para diferentes payloads (Twilio, etc.)
-  const from = req.body.From || req.body.sessionId; // Identificador único do usuário
+  const msg = req.body.Body || req.body.text; // Mensagem do usuário
+  const from = req.body.From || req.body.sessionId; // ID do remetente (ex: whatsapp:+5512...)
+  const profileName = req.body.ProfileName || "Cliente"; // Nome do perfil do WhatsApp
 
+  // Validação básica da requisição
   if (!msg || !from) {
     console.error("Requisição webhook inválida: 'Body' ou 'From' ausentes.");
     return res.status(400).send("Requisição inválida.");
   }
 
-  const sessionId = from;
+  const sessionId = from; // Usa o 'from' como ID da sessão do Dialogflow
   const sessionPath = sessionClient.projectAgentSessionPath(
     projectId,
     sessionId
@@ -171,73 +172,113 @@ app.post("/webhook", async (req, res) => {
     },
   };
 
-  let resposta = ""; // Variável para armazenar a resposta a ser enviada
+  let resposta = ""; // Variável para armazenar a resposta a ser enviada ao usuário
+
   try {
     const [response] = await sessionClient.detectIntent(request);
-    const result = response.queryResult;
-    let intent = result.intent?.displayName || "default"; // Intent detectada pelo Dialogflow
-    const parametros = result.parameters?.fields || {}; // Parâmetros extraídos
+    let intent = response.queryResult.intent?.displayName || "default";
+    const parametros = response.queryResult.parameters?.fields || {};
 
+    // --- Logs Detalhados para Depuração ---
     console.log("--- Nova Requisição ---");
     console.log("Mensagem do usuário:", msg);
-    console.log("Intent detectada:", intent);
+    console.log("De:", from);
+
+    // Encontra ou cria o cliente no banco de dados e obtém o nome mais atualizado
+    // A função encontrarOuCriarCliente agora tenta persistir o profileName do Twilio
+    // e prioriza o nome já salvo no DB.
+    let cliente = await encontrarOuCriarCliente(from, profileName);
+    console.log("Nome do Cliente (no log):", cliente.nome);
+
+    console.log("Intent detectada pelo Dialogflow:", intent);
     console.log("Parâmetros recebidos:", JSON.stringify(parametros, null, 2));
     console.log(
-      "Estado atual:",
+      "Estado atual (agendamentosPendentes):",
       agendamentosPendentes.get(from) || "Nenhum estado"
     );
 
-    // Lógica para redirecionar intents 'default' com base no estado do agendamento pendente
     const estadoAgendamentoPendente = agendamentosPendentes.get(from);
-    if (intent === "default" && estadoAgendamentoPendente) {
-      if (
-        estadoAgendamentoPendente.confirmationStep ===
-        "awaiting_reagendamento_datahora"
-      ) {
-        intent = "escolha_datahora_reagendamento";
-      } else if (
-        estadoAgendamentoPendente.confirmationStep ===
-          "awaiting_name_confirmation" &&
-        ["sim", "confirmar", "pode agendar"].some((k) =>
-          msg.toLowerCase().includes(k)
-        )
-      ) {
-        intent = "confirmar_agendamento";
-      } else if (
-        estadoAgendamentoPendente.confirmationStep ===
-          "confirmar_inicio_reagendamento" &&
-        ["sim", "confirmar", "quero continuar"].some((k) =>
-          msg.toLowerCase().includes(k)
-        )
-      ) {
-        intent = "confirmar_inicio_reagendamento";
-      } else if (
-        estadoAgendamentoPendente.confirmationStep ===
-          "awaiting_reagendamento_confirmation" &&
-        ["sim", "confirmar"].some((k) => msg.toLowerCase().includes(k))
-      ) {
-        intent = "confirmar_reagendamento";
-      } else if (
-        estadoAgendamentoPendente.confirmationStep ===
-          "confirmar_horario_proximo" &&
-        ["sim", "confirmar"].some((k) => msg.toLowerCase().includes(k))
-      ) {
-        intent = "confirmar_horario_proximo";
-      } else if (
-        estadoAgendamentoPendente.confirmationStep === "awaiting_new_name"
-      ) {
-        // Se estiver aguardando um novo nome e a mensagem não for uma confirmação, assume que é o novo nome.
-        // Adicionar um tratamento mais específico para o novo nome aqui, talvez com uma nova intent ou sub-caso.
-        intent = "atualizar_nome_cliente"; // Nova intent para tratar a atualização do nome
+
+    // --- Lógica para forçar/ajustar a intent com base no estado atual do agendamento ---
+    // Isso garante que o fluxo do bot seja mantido mesmo se o Dialogflow detectar uma intent genérica.
+    if (estadoAgendamentoPendente) {
+      switch (estadoAgendamentoPendente.confirmationStep) {
+        case "awaiting_reagendamento_datahora":
+          // Se o usuário está esperando uma data/hora para reagendar e a intent é default, força 'escolha_datahora_reagendamento'
+          if (intent === "default") {
+            intent = "escolha_datahora_reagendamento";
+          }
+          break;
+        case "awaiting_name_choice":
+          // Se o usuário está escolhendo manter ou trocar o nome
+          const msgLower = msg.toLowerCase().trim();
+          if (
+            ["sim", "manter", "confirmar", "pode agendar", "agendar"].some(
+              (k) => msgLower.includes(k)
+            )
+          ) {
+            intent = "confirmar_agendamento_com_nome";
+          } else if (
+            ["não", "trocar", "outro"].some((k) => msgLower.includes(k))
+          ) {
+            intent = "pedir_novo_nome";
+          }
+          break;
+        case "awaiting_new_name":
+          // Se o bot está esperando um novo nome, qualquer mensagem é tratada como 'salvar_novo_nome'
+          intent = "salvar_novo_nome";
+          break;
+        case "confirmar_inicio_reagendamento":
+          // Confirmação para iniciar o reagendamento de um agendamento único
+          if (
+            ["sim", "confirmar", "quero continuar"].some((k) =>
+              msgLower.includes(k)
+            )
+          ) {
+            intent = "confirmar_inicio_reagendamento";
+          }
+          break;
+        case "awaiting_reagendamento_confirmation":
+          // Confirmação final do reagendamento
+          if (["sim", "confirmar"].some((k) => msgLower.includes(k))) {
+            intent = "confirmar_reagendamento";
+          } else if (["não", "cancelar"].some((k) => msgLower.includes(k))) {
+            resposta =
+              "Reagendamento cancelado. Deseja escolher outro horário?";
+            // Volta para a etapa de escolha de horário para reagendamento, caso o usuário mude de ideia
+            estadoAgendamentoPendente.confirmationStep =
+              "awaiting_reagendamento_datahora";
+            agendamentosPendentes.set(from, estadoAgendamentoPendente);
+            res.json({ reply: resposta });
+            return; // Encerra a execução após enviar a resposta
+          }
+          break;
+        case "confirmar_horario_proximo":
+          // Confirmação de um horário alternativo sugerido
+          if (["sim", "confirmar"].some((k) => msgLower.includes(k))) {
+            intent = "confirmar_horario_proximo";
+          }
+          break;
+        case "confirmar_cancelamento":
+          // Confirmação final do cancelamento
+          if (["sim", "confirmar"].some((k) => msgLower.includes(k))) {
+            intent = "confirmar_cancelamento";
+          } else if (["não", "cancelar"].some((k) => msgLower.includes(k))) {
+            resposta = "Cancelamento não confirmado. Deseja fazer algo mais?";
+            agendamentosPendentes.delete(from); // Limpa o estado de cancelamento
+            res.json({ reply: resposta });
+            return; // Encerra a execução
+          }
+          break;
       }
     }
 
-    // --- Lógica de Negócio Baseada na Intent ---
+    // --- Processamento da Intent Detectada ---
     switch (intent) {
       case "welcome_intent":
         resposta =
           "Opa, seja bem-vindo à Barbearia!\nQual serviço deseja agendar? (Corte, Barba, ou Sobrancelha)";
-        agendamentosPendentes.delete(from); // Limpa qualquer estado pendente ao iniciar
+        agendamentosPendentes.delete(from); // Garante que nenhum estado antigo atrapalhe
         break;
 
       case "escolha_servico": {
@@ -245,6 +286,7 @@ app.post("/webhook", async (req, res) => {
         if (!servicoNome) {
           resposta =
             "Não entendi qual serviço você deseja. Escolha entre Corte, Barba ou Sobrancelha.";
+          agendamentosPendentes.delete(from);
           break;
         }
 
@@ -253,19 +295,20 @@ app.post("/webhook", async (req, res) => {
 
         if (!servicoInfo) {
           resposta = `Desculpe, o serviço "${servicoNome}" não foi reconhecido. Escolha entre Corte, Barba ou Sobrancelha.`;
+          agendamentosPendentes.delete(from);
           break;
         }
 
-        // Inicializa ou recupera o estado de agendamento pendente
         let agendamentoPendente = agendamentosPendentes.get(from) || {
           servicos: [],
           servicoIds: [],
           confirmationStep: "initial",
         };
 
-        // Adiciona o serviço se ainda não estiver na lista
+        // Adiciona o serviço escolhido (evita duplicatas se o usuário repetir)
         if (!agendamentoPendente.servicos.includes(servicoInfo.nome)) {
           agendamentoPendente.servicos.push(servicoInfo.nome);
+          // Garante que servicoIds seja um array e adiciona o ID
           agendamentoPendente.servicoIds = Array.isArray(
             agendamentoPendente.servicoIds
           )
@@ -275,7 +318,8 @@ app.post("/webhook", async (req, res) => {
         }
 
         const horarios = await buscarHorariosDisponiveis();
-        if (!horarios.length) {
+        // Verifica se há horários ou se a busca falhou
+        if (!horarios || !horarios.length) {
           resposta =
             "Não temos horários disponíveis no momento. Tente novamente mais tarde!";
           agendamentosPendentes.delete(from);
@@ -296,6 +340,7 @@ app.post("/webhook", async (req, res) => {
 
       case "escolha_datahora": {
         const agendamentoPendente = agendamentosPendentes.get(from);
+        // Valida se há um agendamento em andamento e serviços selecionados
         if (
           !agendamentoPendente ||
           !agendamentoPendente.servicos.length ||
@@ -309,7 +354,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         const horarios = await buscarHorariosDisponiveis();
-        if (!horarios.length) {
+        if (!horarios || !horarios.length) {
           resposta =
             "Não temos horários disponíveis no momento. Tente novamente mais tarde!";
           agendamentosPendentes.delete(from);
@@ -321,11 +366,11 @@ app.post("/webhook", async (req, res) => {
         let dataSolicitada = null;
 
         if (!isNaN(escolhaNumero) && horarios[escolhaNumero]) {
-          // Se o usuário digitou um número da lista
+          // Usuário escolheu por número
           horarioId = horarios[escolhaNumero].id;
           diaHorario = horarios[escolhaNumero].dia_horario;
         } else {
-          // Tenta extrair a data/hora da mensagem de texto livre
+          // Usuário tentou informar dia e hora
           const diaSemanaMatch = msg
             .toLowerCase()
             .match(/(segunda|terça|quarta|quinta|sexta|sábado|domingo)/);
@@ -339,21 +384,21 @@ app.post("/webhook", async (req, res) => {
               horaMatch[0].replace(/h|horas?|às/i, "").trim()
             );
           } else if (parametros?.["date-time"]?.stringValue) {
-            // Se o Dialogflow já extraiu uma data/hora
+            // Se o Dialogflow detectou um @sys.date-time
             dataSolicitada = new Date(parametros["date-time"].stringValue);
           } else if (msg.match(/\d{1,2}:\d{2}/)) {
-            // Último recurso para hora (ex: "10:30") sem dia
+            // Se o usuário digitou apenas um horário (ex: "10:00")
             const [hora, minuto = "00"] = msg
               .match(/\d{1,2}:\d{2}/)[0]
               .split(":");
-            dataSolicitada = new Date(); // Data de hoje
+            dataSolicitada = new Date();
             dataSolicitada.setHours(
               parseInt(hora, 10),
               parseInt(minuto, 10),
               0,
               0
             );
-            // Se a hora já passou hoje, tenta para o mesmo horário amanhã
+            // Se o horário já passou hoje, sugere para o dia seguinte
             if (dataSolicitada < new Date()) {
               dataSolicitada.setDate(dataSolicitada.getDate() + 1);
             }
@@ -369,7 +414,7 @@ app.post("/webhook", async (req, res) => {
               hour12: false,
             });
 
-            // Busca no banco um horário exato que corresponda à solicitação
+            // Busca por horário exato no banco de dados
             const [horarioRow] = await pool.query(
               `SELECT id, dia_horario
                FROM horarios_disponiveis
@@ -385,22 +430,23 @@ app.post("/webhook", async (req, res) => {
               horarioId = horarioRow[0].id;
               diaHorario = horarioRow[0].dia_horario;
             } else {
-              // Se não encontrou um horário exato, procura o mais próximo
+              // Se o horário exato não for encontrado, procura o mais próximo
               const horarioMaisProximo = encontrarHorarioProximo(
                 dataSolicitada.toISOString(),
                 horarios
               );
               if (horarioMaisProximo) {
                 resposta = `O horário *${diaDaSemanaFormatado} às ${horaFormatada}* não está disponível. O mais próximo é *${formatarData(
-                  horarioMaisProproximo.dia_horario
+                  horarioMaisProximo.dia_horario
                 )}*. Deseja escolher este? Responda 'Sim' ou escolha outro horário.`;
+                // Armazena o horário próximo para confirmação futura
                 agendamentosPendentes.set(from, {
                   ...agendamentoPendente,
-                  confirmationStep: "confirmar_horario_proximo", // Novo estado para confirmar o horário próximo
+                  confirmationStep: "confirmar_horario_proximo",
                   horarioProximoId: horarioMaisProximo.id,
                   diaHorarioProximo: horarioMaisProximo.dia_horario,
                 });
-                break;
+                break; // Sai do switch case, aguardando a confirmação do horário próximo
               } else {
                 resposta = `Nenhum horário disponível próximo a *${diaDaSemanaFormatado} às ${horaFormatada}*. Escolha outro:\n\n${horarios
                   .map(
@@ -412,7 +458,6 @@ app.post("/webhook", async (req, res) => {
               }
             }
           } else {
-            // Se a entrada não pôde ser interpretada como número nem como data/hora válida
             resposta = `Formato inválido. Por favor, escolha um número da lista ou informe um dia e horário (exemplo: Sexta 10:00).\n\nHorários disponíveis:\n\n${horarios
               .map(
                 (h, index) => `${index + 1}. *${formatarData(h.dia_horario)}*`
@@ -422,83 +467,86 @@ app.post("/webhook", async (req, res) => {
           }
         }
 
-        // Se chegamos aqui, temos um horárioId e diaHorario válidos
+        // Se um horário válido foi escolhido/encontrado, atualiza o estado
         agendamentoPendente.horarioId = horarioId;
         agendamentoPendente.dia_horario = diaHorario;
 
-        // Encontra ou cria o cliente
-        const cliente = await encontrarOuCriarCliente(from, "Cliente"); // 'Cliente' como nome padrão inicial
+        // O objeto 'cliente' já está atualizado no início do webhook
         agendamentoPendente.clienteId = cliente.id;
+        agendamentoPendente.nomeSugerido = cliente.nome;
 
-        agendamentoPendente.confirmationStep = "awaiting_name_confirmation";
+        agendamentoPendente.confirmationStep = "awaiting_name_choice";
         agendamentosPendentes.set(from, agendamentoPendente);
 
         const horarioFormatado = formatarData(diaHorario);
         resposta = `Você escolheu *${agendamentoPendente.servicos.join(
           " e "
-        )}* para *${horarioFormatado}*. Confirma com o nome *${
+        )}* para *${horarioFormatado}*. O nome que usaremos para o agendamento é *${
           cliente.nome
-        }*? Responda 'Sim' ou informe outro nome.`;
+        }* e o telefone *${
+          cliente.telefone
+        }*. Gostaria de manter este nome ou informar outro? (Responda 'Manter' ou 'Trocar')`;
         break;
       }
 
-      case "confirmar_agendamento": {
+      case "confirmar_agendamento_com_nome": {
         const agendamentoPendente = agendamentosPendentes.get(from);
         if (
           !agendamentoPendente ||
-          agendamentoPendente.confirmationStep !== "awaiting_name_confirmation"
+          (agendamentoPendente.confirmationStep !== "awaiting_name_choice" &&
+            agendamentoPendente.confirmationStep !==
+              "awaiting_new_name_confirmation") // Permite confirmar após digitar um novo nome
         ) {
           resposta =
-            "Nenhum agendamento em andamento. Quer agendar um serviço?";
+            "Nenhum agendamento em andamento ou etapa incorreta. Quer agendar um serviço?";
           agendamentosPendentes.delete(from);
           break;
         }
 
-        const isConfirmation = ["sim", "confirmar", "pode agendar"].some((k) =>
-          msg.toLowerCase().includes(k)
-        );
-        const isRejection = ["não", "outro nome"].some(
-          (
-            k // Renomeei para isRejection para maior clareza
-          ) => msg.toLowerCase().includes(k)
+        // A variável 'cliente' no escopo global do webhook já possui o nome correto.
+        const result = await agendarServico(
+          agendamentoPendente.clienteId,
+          agendamentoPendente.horarioId,
+          agendamentoPendente.servicoIds
         );
 
-        if (isConfirmation) {
-          const result = await agendarServico(
-            agendamentoPendente.clienteId,
-            agendamentoPendente.horarioId,
-            agendamentoPendente.servicoIds
-          );
-
-          if (!result.success) {
-            resposta =
-              result.message ||
-              "Ops, algo deu errado ao agendar. Tente novamente.";
-            agendamentosPendentes.delete(from);
-            break;
-          }
-
-          const horarioFormatado = formatarData(
-            agendamentoPendente.dia_horario
-          );
-          resposta = `✅ Agendamento confirmado para *${agendamentoPendente.servicos.join(
-            " e "
-          )}* em *${horarioFormatado}*!`;
-          agendamentosPendentes.delete(from);
-        } else if (isRejection) {
-          resposta = "Ok, qual nome você gostaria de usar para o agendamento?";
-          agendamentosPendentes.set(from, {
-            ...agendamentoPendente,
-            confirmationStep: "awaiting_new_name", // Novo estado para aguardar o novo nome
-          });
-        } else {
+        if (!result.success) {
           resposta =
-            "Responda 'Sim' para confirmar ou 'Não' para informar outro nome.";
+            result.message ||
+            "Ops, algo deu errado ao agendar. Tente novamente.";
+          agendamentosPendentes.delete(from);
+          break;
         }
+
+        const horarioFormatado = formatarData(agendamentoPendente.dia_horario);
+        resposta = `✅ Agendamento confirmado para *${agendamentoPendente.servicos.join(
+          " e "
+        )}* em *${horarioFormatado}*, no nome de *${cliente.nome}*!`; // Usa o nome atualizado do cliente
+        agendamentosPendentes.delete(from);
         break;
       }
 
-      case "atualizar_nome_cliente": {
+      case "pedir_novo_nome": {
+        const agendamentoPendente = agendamentosPendentes.get(from);
+        if (
+          !agendamentoPendente ||
+          agendamentoPendente.confirmationStep !== "awaiting_name_choice"
+        ) {
+          resposta =
+            "Não estou esperando um nome agora. Por favor, comece o agendamento novamente.";
+          agendamentosPendentes.delete(from);
+          break;
+        }
+        resposta =
+          "Ok, por favor, me diga o nome que você gostaria de usar para o agendamento.";
+        agendamentosPendentes.set(from, {
+          ...agendamentoPendente,
+          confirmationStep: "awaiting_new_name",
+        });
+        break;
+      }
+
+      case "salvar_novo_nome": {
         const agendamentoPendente = agendamentosPendentes.get(from);
         if (
           !agendamentoPendente ||
@@ -510,9 +558,8 @@ app.post("/webhook", async (req, res) => {
           break;
         }
 
-        const novoNome = msg.trim(); // Assume que a mensagem é o novo nome
+        const novoNome = msg.trim();
         if (novoNome.length < 2) {
-          // Validação simples do nome
           resposta =
             "Por favor, me diga um nome válido (com pelo menos 2 caracteres).";
           break;
@@ -523,15 +570,23 @@ app.post("/webhook", async (req, res) => {
           novoNome
         );
 
-        if (clienteAtualizado.success) {
+        if (clienteAtualizado) {
+          // ATUALIZA o objeto 'cliente' global na requisição com o nome recém-salvo
+          cliente = clienteAtualizado;
+
+          agendamentoPendente.nomeSugerido = novoNome;
           const horarioFormatado = formatarData(
             agendamentoPendente.dia_horario
           );
           resposta = `Nome atualizado para *${novoNome}*. Confirma o agendamento de *${agendamentoPendente.servicos.join(
             " e "
-          )}* para *${horarioFormatado}*? Responda 'Sim' ou 'Não'.`;
-          agendamentoPendente.confirmationStep = "awaiting_name_confirmation"; // Volta para a etapa de confirmação, mas agora com o novo nome
-          agendamentosPendentes.set(from, agendamentoPendente);
+          )}* para *${horarioFormatado}* com o telefone *${
+            cliente.telefone
+          }*? (Responda 'Sim' ou 'Não')`;
+          agendamentosPendentes.set(from, {
+            ...agendamentoPendente,
+            confirmationStep: "awaiting_name_choice", // Volta para a etapa de escolha para confirmar o agendamento com o novo nome
+          });
         } else {
           resposta =
             "Não consegui atualizar seu nome. Por favor, tente novamente.";
@@ -540,12 +595,15 @@ app.post("/webhook", async (req, res) => {
       }
 
       case "reagendar_agendamento": {
-        const cliente = await encontrarOuCriarCliente(from, "Cliente");
+        // Cliente já foi obtido no início do webhook.
         let agendamentosAtivos;
         try {
           agendamentosAtivos = await listarAgendamentosAtivos(cliente.id);
         } catch (error) {
-          console.error("Erro ao listar agendamentos:", error);
+          console.error(
+            "ERRO: Erro ao listar agendamentos para reagendamento:",
+            error
+          );
           resposta =
             "Ops, não conseguimos verificar seus agendamentos. Tente novamente mais tarde.";
           agendamentosPendentes.delete(from);
@@ -565,7 +623,7 @@ app.post("/webhook", async (req, res) => {
           agendamentosPendentes.set(from, {
             clienteId: cliente.id,
             agendamentoId: agendamento.id,
-            servico: agendamento.servico, // Mantém o serviço para referência futura
+            servico: agendamento.servico,
             confirmationStep: "confirmar_inicio_reagendamento",
           });
         } else {
@@ -579,7 +637,7 @@ app.post("/webhook", async (req, res) => {
           resposta += `\nDigite o número do agendamento (exemplo: 1).`;
           agendamentosPendentes.set(from, {
             clienteId: cliente.id,
-            agendamentosAtivos, // Armazena a lista para referência
+            agendamentosAtivos,
             confirmationStep: "selecionar_reagendamento",
           });
         }
@@ -605,7 +663,7 @@ app.post("/webhook", async (req, res) => {
 
         if (!isNaN(escolhaNumero) && agendamentoEscolhido) {
           const horarios = await buscarHorariosDisponiveis();
-          if (!horarios.length) {
+          if (!horarios || !horarios.length) {
             resposta =
               "Não temos horários disponíveis no momento. Tente novamente mais tarde!";
             agendamentosPendentes.delete(from);
@@ -627,7 +685,7 @@ app.post("/webhook", async (req, res) => {
             agendamentoId: agendamentoEscolhido.id,
             servico: agendamentoEscolhido.servico,
             confirmationStep: "awaiting_reagendamento_datahora",
-            agendamentosAtivos: undefined, // Limpa a lista de agendamentos após a seleção
+            agendamentosAtivos: undefined, // Limpa agendamentosAtivos para evitar uso incorreto
           });
         } else {
           resposta = `Escolha um número válido do agendamento que deseja reagendar.`;
@@ -654,7 +712,7 @@ app.post("/webhook", async (req, res) => {
 
         if (isConfirmation) {
           const horarios = await buscarHorariosDisponiveis();
-          if (!horarios.length) {
+          if (!horarios || !horarios.length) {
             resposta =
               "Não temos horários disponíveis no momento. Tente novamente mais tarde!";
             agendamentosPendentes.delete(from);
@@ -690,7 +748,7 @@ app.post("/webhook", async (req, res) => {
         }
 
         const horarios = await buscarHorariosDisponiveis();
-        if (!horarios.length) {
+        if (!horarios || !horarios.length) {
           resposta =
             "Não temos horários disponíveis no momento. Tente novamente mais tarde!";
           agendamentosPendentes.delete(from);
@@ -848,7 +906,7 @@ app.post("/webhook", async (req, res) => {
         } else {
           resposta = "Reagendamento cancelado. Deseja escolher outro horário?";
           agendamentoPendente.confirmationStep =
-            "awaiting_reagendamento_datahora"; // Volta para a escolha de horário
+            "awaiting_reagendamento_datahora"; // Permite que o usuário escolha outro horário imediatamente
           agendamentosPendentes.set(from, agendamentoPendente);
         }
         break;
@@ -860,7 +918,7 @@ app.post("/webhook", async (req, res) => {
           !agendamentoPendente ||
           agendamentoPendente.confirmationStep !==
             "confirmar_horario_proximo" ||
-          !agendamentoPendente.horarioProximoId // Garante que há um horário próximo para confirmar
+          !agendamentoPendente.horarioProximoId
         ) {
           resposta =
             "Nenhuma sugestão de horário próximo para confirmar. Por favor, tente novamente.";
@@ -873,12 +931,10 @@ app.post("/webhook", async (req, res) => {
         );
 
         if (isConfirmation) {
-          // Usa o horário próximo sugerido
           agendamentoPendente.horarioId = agendamentoPendente.horarioProximoId;
           agendamentoPendente.dia_horario =
             agendamentoPendente.diaHorarioProximo;
 
-          // Redireciona para a confirmação final, seja de agendamento ou reagendamento
           if (agendamentoPendente.agendamentoId) {
             // Se for um reagendamento
             agendamentoPendente.confirmationStep =
@@ -889,52 +945,52 @@ app.post("/webhook", async (req, res) => {
             resposta = `Você escolheu reagendar *${agendamentoPendente.servico}* para *${horarioFormatado}*. Confirma? Responda 'Sim' ou 'Não'.`;
           } else {
             // Se for um novo agendamento
-            agendamentoPendente.confirmationStep = "awaiting_name_confirmation";
-            const cliente = await encontrarOuCriarCliente(from, "Cliente");
+            agendamentoPendente.confirmationStep = "awaiting_name_choice";
+            // 'cliente' já está no escopo global do webhook com os dados atualizados
+            agendamentoPendente.clienteId = cliente.id;
+            agendamentoPendente.nomeSugerido = cliente.nome;
             const horarioFormatado = formatarData(
               agendamentoPendente.dia_horario
             );
             resposta = `Você escolheu *${agendamentoPendente.servicos.join(
               " e "
-            )}* para *${horarioFormatado}*. Confirma com o nome *${
+            )}* para *${horarioFormatado}*. O nome que usaremos para o agendamento é *${
               cliente.nome
-            }*? Responda 'Sim' ou informe outro nome.`;
+            }* e o telefone *${
+              cliente.telefone
+            }*. Gostaria de manter este nome ou informar outro? (Responda 'Manter' ou 'Trocar')`;
           }
           agendamentosPendentes.set(from, agendamentoPendente);
         } else {
-          // Usuário recusou o horário próximo, pede para escolher outro
+          // Se o usuário não quiser o horário próximo, oferece a lista novamente
           const horarios = await buscarHorariosDisponiveis();
           resposta = `Ok, escolha outro horário:\n\n${horarios
             .map((h, index) => `${index + 1}. *${formatarData(h.dia_horario)}*`)
-            .join(
-              "\n"
-            )}\n\nDigite o número do horário ou informe um dia e horário (exemplo: Sexta 10:00).`;
+            .join("\n")}\n\nOu use o formato 'Sexta 10:00'.`;
 
-          // Dependendo do fluxo, volta para a escolha de data/hora relevante
           agendamentoPendente.confirmationStep =
             agendamentoPendente.agendamentoId
-              ? "awaiting_reagendamento_datahora"
-              : "awaiting_date_time";
-          delete agendamentoPendente.horarioProximoId; // Limpa o estado do horário próximo
+              ? "awaiting_reagendamento_datahora" // Volta para escolha de horário para reagendamento
+              : "awaiting_date_time"; // Volta para escolha de horário para novo agendamento
+          delete agendamentoPendente.horarioProximoId; // Limpa os dados do horário sugerido
           delete agendamentoPendente.diaHorarioProximo;
           agendamentosPendentes.set(from, agendamentoPendente);
         }
         break;
       }
 
-      // Adicionei um caso para "cancelar_agendamento" para completar o fluxo comum
       case "cancelar_agendamento": {
-        const cliente = await encontrarOuCriarCliente(from, "Cliente");
+        // 'cliente' já está no escopo global do webhook com os dados atualizados
         let agendamentosAtivos;
         try {
           agendamentosAtivos = await listarAgendamentosAtivos(cliente.id);
         } catch (error) {
           console.error(
-            "Erro ao listar agendamentos para cancelamento:",
+            "ERRO: Erro ao listar agendamentos para cancelamento:",
             error
           );
           resposta =
-            "Ops, não conseguimos verificar seus agendamentos para cancelar. Tente novamente mais tarde.";
+            "Ops, não conseguimos verificar seus agendamentos. Tente novamente mais tarde.";
           agendamentosPendentes.delete(from);
           break;
         }
@@ -1000,7 +1056,7 @@ app.post("/webhook", async (req, res) => {
             agendamentoId: agendamentoEscolhido.id,
             servico: agendamentoEscolhido.servico,
             confirmationStep: "confirmar_cancelamento",
-            agendamentosAtivos: undefined,
+            agendamentosAtivos: undefined, // Limpa agendamentosAtivos
           });
         } else {
           resposta = `Escolha um número válido do agendamento que deseja cancelar.`;
@@ -1032,7 +1088,9 @@ app.post("/webhook", async (req, res) => {
           if (!result.success) {
             resposta =
               result.message ||
-              "Ops, algo deu errado ao cancelar. Tente novamente.";
+              "Ops, algo deu errado ao cancelar o agendamento. Por favor, tente novamente.";
+            resposta +=
+              "\nSe o problema persistir, entre em contato conosco diretamente para obter ajuda.";
             agendamentosPendentes.delete(from);
             break;
           }
@@ -1046,19 +1104,31 @@ app.post("/webhook", async (req, res) => {
         break;
       }
 
-      default:
-        // Mensagem padrão caso a intent não seja reconhecida ou tratada
+      // Tratamento para a intent 'confirmar_agendamento' (caso seja detectada de forma inesperada)
+      case "confirmar_agendamento":
         resposta =
-          result.fulfillmentText ||
+          "Desculpe, não entendi o que você quer confirmar. Por favor, comece o agendamento novamente.";
+        agendamentosPendentes.delete(from);
+        break;
+
+      default:
+        // Se a intent for 'default' do Dialogflow e não houver um estado ativo,
+        // ou se o estado não foi tratado pelas lógicas acima, usa o fulfillmentText ou uma mensagem genérica.
+        resposta =
+          response.queryResult.fulfillmentText ||
           "Desculpe, não entendi. Pode repetir, por favor?";
-        agendamentosPendentes.delete(from); // Limpa o estado para evitar loops indesejados
+        if (!estadoAgendamentoPendente) {
+          // Limpa o estado se não houver um fluxo ativo
+          agendamentosPendentes.delete(from);
+        }
         break;
     }
 
-    console.log("Resposta enviada:", resposta);
-    res.json({ reply: resposta }); // Envia a resposta de volta
+    console.log("Resposta FINAL a ser enviada ao usuário:", resposta);
+    res.json({ reply: resposta });
   } catch (error) {
-    console.error("Erro no Dialogflow ou webhook:", error);
+    // Captura erros globais do webhook
+    console.error("ERRO GERAL no Dialogflow ou webhook:", error);
     res.json({ reply: "Ops, algo deu errado. Tente novamente?" });
   }
 });
