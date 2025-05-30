@@ -160,6 +160,8 @@ app.post("/webhook", async (req, res) => {
     return res.status(400).send("Requisição inválida.");
   }
 
+  const msgLower = msg.toLowerCase().trim();
+
   const sessionId = from; // Usa o 'from' como ID da sessão do Dialogflow
   const sessionPath = sessionClient.projectAgentSessionPath(
     projectId,
@@ -180,22 +182,22 @@ app.post("/webhook", async (req, res) => {
     const parametros = response.queryResult.parameters?.fields || {};
 
     // --- Logs Detalhados para Depuração ---
-    console.log("--- Nova Requisição ---");
-    console.log("Mensagem do usuário:", msg);
-    console.log("De:", from);
+    // console.log("--- Nova Requisição ---");
+    // console.log("Mensagem do usuário:", msg);
+    // console.log("De:", from);
 
-    // Encontra ou cria o cliente no banco de dados e obtém o nome mais atualizado
-    // A função encontrarOuCriarCliente agora tenta persistir o profileName do Twilio
-    // e prioriza o nome já salvo no DB.
+    // // Encontra ou cria o cliente no banco de dados e obtém o nome mais atualizado
+    // // A função encontrarOuCriarCliente agora tenta persistir o profileName do Twilio
+    // // e prioriza o nome já salvo no DB.
     let cliente = await encontrarOuCriarCliente(from, profileName);
-    console.log("Nome do Cliente (no log):", cliente.nome);
+    // console.log("Nome do Cliente (no log):", cliente.nome);
 
-    console.log("Intent detectada pelo Dialogflow:", intent);
-    console.log("Parâmetros recebidos:", JSON.stringify(parametros, null, 2));
-    console.log(
-      "Estado atual (agendamentosPendentes):",
-      agendamentosPendentes.get(from) || "Nenhum estado"
-    );
+    // console.log("Intent detectada pelo Dialogflow:", intent);
+    // console.log("Parâmetros recebidos:", JSON.stringify(parametros, null, 2));
+    // console.log(
+    //   "Estado atual (agendamentosPendentes):",
+    //   agendamentosPendentes.get(from) || "Nenhum estado"
+    // );
 
     const estadoAgendamentoPendente = agendamentosPendentes.get(from);
 
@@ -211,7 +213,6 @@ app.post("/webhook", async (req, res) => {
           break;
         case "awaiting_name_choice":
           // Se o usuário está escolhendo manter ou trocar o nome
-          const msgLower = msg.toLowerCase().trim();
           if (
             ["sim", "manter", "confirmar", "pode agendar", "agendar"].some(
               (k) => msgLower.includes(k)
@@ -224,6 +225,7 @@ app.post("/webhook", async (req, res) => {
             intent = "pedir_novo_nome";
           }
           break;
+
         case "awaiting_new_name":
           // Se o bot está esperando um novo nome, qualquer mensagem é tratada como 'salvar_novo_nome'
           intent = "salvar_novo_nome";
@@ -250,7 +252,7 @@ app.post("/webhook", async (req, res) => {
               "awaiting_reagendamento_datahora";
             agendamentosPendentes.set(from, estadoAgendamentoPendente);
             res.json({ reply: resposta });
-            return; // Encerra a execução após enviar a resposta
+            return;
           }
           break;
         case "confirmar_horario_proximo":
@@ -277,7 +279,7 @@ app.post("/webhook", async (req, res) => {
     switch (intent) {
       case "welcome_intent":
         resposta =
-          "Opa, seja bem-vindo à Barbearia!\nQual serviço deseja agendar? (Corte, Barba, ou Sobrancelha)";
+          "Opa, seja bem-vindo à Barbearia!\nQual serviço deseja agendar?\nCorte\nBarba\n\nSe quiser cancelar digite: 'Cancelar'";
         agendamentosPendentes.delete(from); // Garante que nenhum estado antigo atrapalhe
         break;
 
@@ -328,7 +330,7 @@ app.post("/webhook", async (req, res) => {
 
         resposta = `Ótimo! Você escolheu *${agendamentoPendente.servicos.join(
           " e "
-        )}*. Horários disponíveis:\n\n${horarios
+        )}*.\nHorários disponíveis:\n\n${horarios
           .map((h, index) => `${index + 1}. *${formatarData(h.dia_horario)}*`)
           .join(
             "\n"
@@ -479,13 +481,9 @@ app.post("/webhook", async (req, res) => {
         agendamentosPendentes.set(from, agendamentoPendente);
 
         const horarioFormatado = formatarData(diaHorario);
-        resposta = `Você escolheu *${agendamentoPendente.servicos.join(
-          " e "
-        )}* para *${horarioFormatado}*. O nome que usaremos para o agendamento é *${
+        resposta = `Você escolheu *${agendamentoPendente.servicos.join()}* para *${horarioFormatado}*.\nO nome que usaremos para o agendamento é *${
           cliente.nome
-        }* e o telefone *${
-          cliente.telefone
-        }*. Gostaria de manter este nome ou informar outro? (Responda 'Manter' ou 'Trocar')`;
+        }*.\nGostaria de manter este nome ou informar outro? (Responda 'Sim' ou 'Trocar')`;
         break;
       }
 
@@ -519,9 +517,9 @@ app.post("/webhook", async (req, res) => {
         }
 
         const horarioFormatado = formatarData(agendamentoPendente.dia_horario);
-        resposta = `✅ Agendamento confirmado para *${agendamentoPendente.servicos.join(
-          " e "
-        )}* em *${horarioFormatado}*, no nome de *${cliente.nome}*!`; // Usa o nome atualizado do cliente
+        resposta = `✅ Agendamento confirmado para *${agendamentoPendente.servicos.join()}* na *${horarioFormatado}*\nNo nome de: *${
+          cliente.nome
+        }*!`;
         agendamentosPendentes.delete(from);
         break;
       }
@@ -537,6 +535,7 @@ app.post("/webhook", async (req, res) => {
           agendamentosPendentes.delete(from);
           break;
         }
+        console.log(agendamentoPendente);
         resposta =
           "Ok, por favor, me diga o nome que você gostaria de usar para o agendamento.";
         agendamentosPendentes.set(from, {
@@ -578,11 +577,9 @@ app.post("/webhook", async (req, res) => {
           const horarioFormatado = formatarData(
             agendamentoPendente.dia_horario
           );
-          resposta = `Nome atualizado para *${novoNome}*. Confirma o agendamento de *${agendamentoPendente.servicos.join(
+          resposta = `Nome atualizado para *${novoNome}*.\nConfirma o agendamento de *${agendamentoPendente.servicos.join(
             " e "
-          )}* para *${horarioFormatado}* com o telefone *${
-            cliente.telefone
-          }*? (Responda 'Sim' ou 'Não')`;
+          )}* para *${horarioFormatado}*? (Responda 'Sim' ou 'Não')`;
           agendamentosPendentes.set(from, {
             ...agendamentoPendente,
             confirmationStep: "awaiting_name_choice", // Volta para a etapa de escolha para confirmar o agendamento com o novo nome
@@ -954,11 +951,9 @@ app.post("/webhook", async (req, res) => {
             );
             resposta = `Você escolheu *${agendamentoPendente.servicos.join(
               " e "
-            )}* para *${horarioFormatado}*. O nome que usaremos para o agendamento é *${
+            )}* para *${horarioFormatado}*.\nO nome que usaremos para o agendamento é *${
               cliente.nome
-            }* e o telefone *${
-              cliente.telefone
-            }*. Gostaria de manter este nome ou informar outro? (Responda 'Manter' ou 'Trocar')`;
+            }*.\nGostaria de manter este nome ou informar outro? (Responda 'Sim' ou 'Trocar')`;
           }
           agendamentosPendentes.set(from, agendamentoPendente);
         } else {
